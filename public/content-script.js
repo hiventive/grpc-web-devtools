@@ -12,6 +12,9 @@ function injectors(msgSource) {
     SERVER_STREAMING: 'server_streaming'
   };
 
+  const requestMethodName = (req) => req?.getMethodDescriptor().name ?? 'Unknown'
+
+
   const postMessage = (type, name, reqMsg, resMsg, error) => {
     const request = reqMsg;
     const response = error ? undefined : resMsg;
@@ -28,7 +31,101 @@ function injectors(msgSource) {
     window.postMessage(JSON.parse(JSON.stringify(msg)), '*');
   }
 
+
   class DevToolsUnaryInterceptor {
+    type = MethodType.UNARY;
+
+    postResponse = (name, req, res) => {
+      postMessage(this.type, name, req?.getRequestMessage(), res?.getResponseMessage());
+      return res;
+    }
+
+    postError = (name, req, error) => {
+      if (error.code === 0) return error;
+      postMessage(this.type, name, req?.getRequestMessage(), undefined, error);
+      return error;
+    }
+
+    intercept = (request, invoker) => {
+      const name = requestMethodName(request);
+      return invoker(request)
+        .then((response) => this.postResponse(name, request, response))
+        .catch((error) => { throw this.postError(name, request, error) });
+    }
+  }
+
+  class DevToolsStreamInterceptor {
+
+    intercept(request, invoker) {
+
+      class InterceptedStream {
+        type = MethodType.SERVER_STREAMING;
+        name;
+        stream;
+
+        constructor(request, invoker) {
+          this.name = requestMethodName(request);
+          this.stream = invoker(this.postStreamRequest(request));
+        };
+
+        postStreamRequest = (req) => {
+          postMessage(this.type, this.name, req?.getRequestMessage().toObject());
+          return req;
+        }
+
+        postStreamData = (data) => {
+          postMessage(this.type, this.name, undefined, data?.toObject());
+          return data;
+        }
+
+        postStreamError = (error) => {
+          if (error.code === 0) return error;
+          postMessage(this.type, this.name, undefined, undefined, error);
+          return error;
+        }
+
+        postStreamStatus = (status) => {
+          if (status.code !== 0) return status;
+          status.toObject = () => 'EOF';
+          return this.postStreamData(status);
+        }
+
+        on = (eventType, callback) => {
+          if (eventType === 'data') {
+            const dataCallback = (data) => {
+              callback(this.postStreamData(data));
+            }
+            this.stream.on(eventType, dataCallback);
+          } else if (eventType === 'error') {
+            const errorCallback = (error) => {
+              callback(this.postStreamError(error));
+            }
+            this.stream.on('error', errorCallback);
+          } else if (eventType === 'metadata') {
+            this.stream.on('metadata', callback);
+          } else if (eventType === 'status') {
+            const statusCallback = (status) => {
+              callback(this.postStreamStatus(status));
+            }
+            this.stream.on('status', statusCallback);
+          } else if (eventType === 'end') {
+            this.stream.on('end', callback);
+          }
+          return this;
+        };
+
+        removeListener(eventType, callback) {
+        }
+
+        cancel() {
+        }
+      }
+
+      return new InterceptedStream(request, invoker);
+    };
+  }
+
+  class TSDevToolsUnaryInterceptor {
     type = MethodType.UNARY;
 
     postResponse = (name, req, res) => {
@@ -55,7 +152,7 @@ function injectors(msgSource) {
     }
   }
 
-  class DevToolsStreamInterceptor {
+  class TSDevToolsStreamInterceptor {
  
     intercept(request, invoker, grpcGatewayUrl, serviceName, functionName) {
       function postStreamRequest(req, name, type) {
@@ -63,7 +160,7 @@ function injectors(msgSource) {
         return req;
       }
   
-      function postStreamData(data, name, type){
+      function postStreamData(data, name, type){        
         postMessage(type, name, undefined, data);
         return data;
       }
@@ -101,6 +198,8 @@ function injectors(msgSource) {
   return {
     devToolsUnaryInterceptor: new DevToolsUnaryInterceptor(),
     devToolsStreamInterceptor: new DevToolsStreamInterceptor(),
+    tsDevToolsUnaryInterceptor: new TSDevToolsUnaryInterceptor(),
+    tsDevToolsStreamInterceptor: new TSDevToolsStreamInterceptor(),
   };
 }
 
