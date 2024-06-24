@@ -14,9 +14,10 @@ function injectors(msgSource) {
 
   const requestMethodName = (req) => req?.getMethodDescriptor().name ?? 'Unknown'
 
+
   const postMessage = (type, name, reqMsg, resMsg, error) => {
-    const request = reqMsg?.toObject();
-    const response = error ? undefined : resMsg?.toObject();
+    const request = reqMsg;
+    const response = error ? undefined : resMsg;
     error = error ? (({code, message}) => ({ code, message }))(error) : error;
     const msg = {
       source: msgSource,
@@ -24,10 +25,12 @@ function injectors(msgSource) {
       method: name,
       request,
       response,
-      error
+      error,
+      
     };
-    window.postMessage(msg, '*');
+    window.postMessage(JSON.parse(JSON.stringify(msg)), '*');
   }
+
 
   class DevToolsUnaryInterceptor {
     type = MethodType.UNARY;
@@ -66,12 +69,12 @@ function injectors(msgSource) {
         };
 
         postStreamRequest = (req) => {
-          postMessage(this.type, this.name, req?.getRequestMessage());
+          postMessage(this.type, this.name, req?.getRequestMessage().toObject());
           return req;
         }
 
         postStreamData = (data) => {
-          postMessage(this.type, this.name, undefined, data);
+          postMessage(this.type, this.name, undefined, data?.toObject());
           return data;
         }
 
@@ -83,11 +86,6 @@ function injectors(msgSource) {
 
         postStreamStatus = (status) => {
           if (status.code !== 0) return status;
-          // FIXME: this is a semi-ugly hack. We add
-          //  toObject() => 'EOF' to the status object
-          //  to mimic an reqMes and make postMessage
-          //  happy. In the future, maybe status could
-          //  be handled properly.
           status.toObject = () => 'EOF';
           return this.postStreamData(status);
         }
@@ -127,10 +125,81 @@ function injectors(msgSource) {
     };
   }
 
+  class TSDevToolsUnaryInterceptor {
+    type = MethodType.UNARY;
+
+    postResponse = (name, req, res) => {
+      postMessage(this.type, name, req, res);
+      return res;
+    }
+
+    postError = (name, req, error) => {
+      if (error.code === 0) return error;
+      postMessage(this.type, name, req, undefined, error);
+      return error;
+    }
+
+    intercept = async (request, invoker, grpcGatewayUrl, serviceName, functionName) => {
+      const name = `${grpcGatewayUrl}/${serviceName}/${functionName}`; 
+
+      try {
+        const response = await invoker(request);
+        this.postResponse(name, request, response)
+        return response
+      } catch (error){
+        throw this.postError(name, request, error);
+      }
+    }
+  }
+
+  class TSDevToolsStreamInterceptor {
+ 
+    intercept(request, invoker, grpcGatewayUrl, serviceName, functionName) {
+      function postStreamRequest(req, name, type) {
+        postMessage(type, name, req);
+        return req;
+      }
+  
+      function postStreamData(data, name, type){        
+        postMessage(type, name, undefined, data);
+        return data;
+      }
+  
+      function postStreamError (error, name, type) {
+        if (error.code === 0) return error;
+        postMessage(type, name, undefined, undefined, error);
+        return error;
+      }
+
+      function  postStreamStatus(name, type) {
+        const status  = "EOF"
+        return postStreamData(status, name, type);
+      } 
+
+      const arr = [];
+      const type = MethodType.SERVER_STREAMING;
+      const name = `${grpcGatewayUrl}/${serviceName}/${functionName}`;  
+      
+      postStreamRequest(request, name, type)
+      const stream = invoker(request);
+        
+      stream.subscribe({
+        next(x) { 
+          postStreamData(x, name, type);
+          arr.push(arr)
+        },
+        error(err) { postStreamError(err, name, type) },
+        complete() { postStreamStatus(name, type) }     
+      }); 
+      return stream
+    }
+  }
+
   return {
-    // this is how it should work
     devToolsUnaryInterceptor: new DevToolsUnaryInterceptor(),
     devToolsStreamInterceptor: new DevToolsStreamInterceptor(),
+    tsDevToolsUnaryInterceptor: new TSDevToolsUnaryInterceptor(),
+    tsDevToolsStreamInterceptor: new TSDevToolsStreamInterceptor(),
   };
 }
 
